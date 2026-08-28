@@ -4,8 +4,14 @@ Deux collections liées :
   - mutations : une mutation immobilière = un document, avec ses lots
     imbriqués (embed — 1:peu, jamais consultés hors de leur mutation).
   - communes  : référentiel léger (~340 communes de l'Hérault), REFERENCE
-    depuis mutations via `code_postal` — existence indépendante, réutilisée
-    par des milliers de mutations, stats recalculées périodiquement.
+    depuis mutations via `code_commune` (code INSEE) — PAS `code_postal`.
+
+    Anomalie découverte et corrigée : `code_postal` ne identifie pas une
+    commune de façon unique (81 codes postaux distincts contre 340 codes
+    commune INSEE distincts dans les données brutes) — un code postal peut
+    couvrir plusieurs communes. `code_commune` est le véritable identifiant
+    administratif unique ; `code_postal` est conservé comme simple attribut
+    d'affichage.
 
 Documentation interactive une fois démarré : http://localhost:8000/docs
 """
@@ -61,15 +67,16 @@ col_communes = db[COMMUNES_COLLECTION]
 def creer_index() -> list[str]:
     """Index justifiés par les 3 questions métier :
 
-    - (code_postal, date_mutation) : ESR — Equality (filtre par commune),
-      puis Range (plage de dates) — sert la Q1 (évolution prix/m² par commune)
-      et la route /agg/explain (requête la plus fréquente de l'API).
+    - (code_commune, date_mutation) : ESR — Equality (filtre par commune,
+      via l'identifiant INSEE fiable, PAS code_postal), puis Range (plage
+      de dates). Sert la Q1 et la route /agg/explain (requête la plus
+      fréquente de l'API).
     - id_mutation unique : le piège de comptage documenté du jeu DVF (une
       mutation ne doit jamais être dupliquée après regroupement des lots).
     - position 2dsphere : sert la Q3 (recherche par rayon autour d'un point).
     """
     return [
-        col.create_index([("code_postal", ASCENDING), ("date_mutation", DESCENDING)]),
+        col.create_index([("code_commune", ASCENDING), ("date_mutation", DESCENDING)]),
         col.create_index([("id_mutation", ASCENDING)], unique=True, sparse=True),
         col.create_index([("position", GEOSPHERE)]),
     ]
@@ -90,16 +97,24 @@ class MutationEntrant(BaseModel):
     date_mutation: str = Field(description="Format ISO : YYYY-MM-DD")
     valeur_fonciere: float = Field(ge=0)
     type_local_dominant: str = Field(min_length=1, max_length=50)
-    code_postal: str = Field(min_length=5, max_length=5)
+    code_commune: str = Field(min_length=1, max_length=10, description="Code INSEE — identifiant fiable de la commune")
+    code_postal: str = Field(min_length=5, max_length=5, description="Attribut d'affichage uniquement, PAS une clé")
+    nom_commune: str = Field(min_length=1, max_length=200)
     longitude: float | None = None
     latitude: float | None = None
     lots: list[LotEntrant] = Field(default_factory=list)
 
 
 def vers_document(mutation: MutationEntrant) -> dict[str, Any]:
-    """Traduit le modèle d'entrée validé en document MongoDB (date + GeoJSON)."""
+    """Traduit le modèle d'entrée validé en document MongoDB.
+
+    surface_totale est précalculée et stockée (pattern Computed) plutôt que
+    recalculée à chaque requête d'agrégation — cohérent avec le référentiel
+    `communes`, dont les stats sont elles aussi précalculées.
+    """
     doc = mutation.model_dump(exclude={"longitude", "latitude", "date_mutation"})
     doc["date_mutation"] = datetime.fromisoformat(mutation.date_mutation)
+    doc["surface_totale"] = sum(lot.surface_reelle_bati for lot in mutation.lots)
     if mutation.longitude is not None and mutation.latitude is not None:
         doc["position"] = {
             "type": "Point",
@@ -139,12 +154,12 @@ def health() -> dict[str, Any]:
 # --------------------------------------------------------------------- CRUD
 @app.get("/mutations")
 def lister(
-    code_postal: str | None = None,
+    code_commune: str | None = None,
     limite: int = Query(20, ge=1, le=100),
     page: int = Query(1, ge=1),
 ) -> dict[str, Any]:
-    """Liste paginée, filtrable par commune (code_postal)."""
-    filtre = {"code_postal": code_postal} if code_postal else {}
+    """Liste paginée, filtrable par commune (code_commune — identifiant fiable)."""
+    filtre = {"code_commune": code_commune} if code_commune else {}
     curseur = col.find(filtre).skip((page - 1) * limite).limit(limite)
     return {
         "page": page,
@@ -156,13 +171,13 @@ def lister(
 
 @app.get("/mutations/{item_id}")
 def detail(item_id: str) -> dict[str, Any]:
-    """Détail d'une mutation, enrichi du nom de la commune via $lookup."""
+    """Détail d'une mutation, enrichi des infos de la commune via $lookup."""
     pipeline = [
         {"$match": {"_id": en_object_id(item_id)}},
         {
             "$lookup": {
                 "from": COMMUNES_COLLECTION,
-                "localField": "code_postal",
+                "localField": "code_commune",
                 "foreignField": "_id",
                 "as": "commune",
             }
@@ -209,28 +224,21 @@ def supprimer(item_id: str) -> dict[str, int]:
 
 
 # --------------------------------------------------------------- agrégation
-@app.get("/agg/prix-m2-evolution/{code_postal}")
-def prix_m2_evolution(code_postal: str) -> list[dict[str, Any]]:
+@app.get("/agg/prix-m2-evolution/{code_commune}")
+def prix_m2_evolution(code_commune: str) -> list[dict[str, Any]]:
     """Question métier 1 : évolution du prix au m² par commune, par année.
 
-    Piège évité : `surface_totale` est calculée par mutation (somme des
-    lots) AVANT tout $group, jamais après un $unwind — sinon `valeur_fonciere`
-    serait comptée une fois par lot et fausserait le prix au m².
+    surface_totale est déjà précalculée et stockée sur chaque mutation
+    (pattern Computed) — pas besoin de la recalculer ici via $addFields.
     """
     pipeline = [
         {
             "$match": {
-                "code_postal": code_postal,
-                # Exclut les mutations à valeur symbolique (donations,
-                # transmissions familiales, régularisations administratives)
-                # non représentatives d'un prix de marché. Mesuré sur le
-                # jeu complet : 622 mutations sur 29519 (≈ 2,1 %) ont une
-                # valeur_fonciere < 1000€, dont 235 à 1€ ou moins.
-                "valeur_fonciere": {"$gte": 1000},
+                "code_commune": code_commune,
+                "valeur_fonciere": {"$gte": 1000},  # exclut donations/régularisations
+                "surface_totale": {"$gt": 0},
             }
         },
-        {"$addFields": {"surface_totale": {"$sum": "$lots.surface_reelle_bati"}}},
-        {"$match": {"surface_totale": {"$gt": 0}}},
         {
             "$group": {
                 "_id": {"$year": "$date_mutation"},
@@ -259,22 +267,19 @@ def top10_communes(limite: int = Query(10, ge=1, le=50)) -> list[dict[str, Any]]
     """Question métier 2 : top communes les plus chères (prix/m² moyen).
 
     Contient le $lookup significatif exigé par le cahier des charges :
-    `mutations` ne stocke que `code_postal`, le nom de la commune est
-    récupéré depuis le référentiel `communes`.
+    `mutations` ne stocke que `code_commune`, le nom et le code postal
+    d'affichage de la commune sont récupérés depuis le référentiel `communes`.
     """
     pipeline = [
         {
             "$match": {
-                # Cf. commentaire de prix_m2_evolution : exclut les valeurs
-                # symboliques non représentatives d'un prix de marché.
                 "valeur_fonciere": {"$gte": 1000},
+                "surface_totale": {"$gt": 0},
             }
         },
-        {"$addFields": {"surface_totale": {"$sum": "$lots.surface_reelle_bati"}}},
-        {"$match": {"surface_totale": {"$gt": 0}}},
         {
             "$group": {
-                "_id": "$code_postal",
+                "_id": "$code_commune",
                 "valeur_totale": {"$sum": "$valeur_fonciere"},
                 "surface_totale": {"$sum": "$surface_totale"},
                 "n": {"$sum": 1},
@@ -304,8 +309,9 @@ def top10_communes(limite: int = Query(10, ge=1, le=50)) -> list[dict[str, Any]]
         {
             "$project": {
                 "_id": 0,
-                "code_postal": "$_id",
+                "code_commune": "$_id",
                 "nom_commune": "$commune.nom_commune",
+                "code_postal": "$commune.code_postal",
                 "prix_m2_moyen": 1,
                 "n": 1,
             }
@@ -337,7 +343,8 @@ def proximite(
                 "_id": 0,
                 "id_mutation": 1,
                 "valeur_fonciere": 1,
-                "code_postal": 1,
+                "code_commune": 1,
+                "nom_commune": 1,
                 "distance_m": {"$round": ["$distance_m", 0]},
             }
         },
@@ -371,9 +378,11 @@ def _chaine_de_stages(etage: dict[str, Any]) -> list[str]:
 
 
 @app.get("/agg/explain")
-def expliquer(code_postal: str = "34000") -> dict[str, Any]:
+def expliquer(code_commune: str = "34172") -> dict[str, Any]:
     """Plan d'exécution de la requête la plus fréquente de l'API
     (filtrage par commune) : de quoi produire la capture avant/après index.
+
+    code_commune=34172 par défaut : Montpellier.
 
     Protocole :
       1. démarrer avec AUTO_INDEX=false, appeler cette route  -> COLLSCAN
@@ -382,7 +391,7 @@ def expliquer(code_postal: str = "34000") -> dict[str, Any]:
     """
     plan = db.command(
         "explain",
-        {"find": COLLECTION, "filter": {"code_postal": code_postal}},
+        {"find": COLLECTION, "filter": {"code_commune": code_commune}},
         verbosity="executionStats",
     )
     stats = plan["executionStats"]

@@ -10,10 +10,21 @@
 // Exécution (une fois lots_bruts importé) :
 //   docker exec -i projet-mongo mongosh -u admin -p "$MONGO_ROOT_PASSWORD" \
 //     --authenticationDatabase admin immo < db/build_collections.js
-
-use immo;
-
 print("Documents bruts importés : " + db.lots_bruts.countDocuments({}));
+
+// ==========================================================
+// 0) Anomalie : code_postal n'identifie pas une commune de façon unique
+// ==========================================================
+// Vérification faite AVANT toute construction, pour documenter la découverte
+// au moment où elle se produit (cf. cahier des charges, § rapport).
+
+const nbCodesPostaux = db.lots_bruts.distinct("code_postal").length;
+const nbCodesCommune = db.lots_bruts.distinct("code_commune").length;
+print("\n--- Anomalie : code_postal vs code_commune ---");
+print("Codes postaux distincts : " + nbCodesPostaux);
+print("Codes commune (INSEE) distincts : " + nbCodesCommune);
+print("=> code_postal ne peut PAS servir de clé de référence pour une commune.");
+print("   On utilise code_commune (identifiant administratif unique) à la place.\n");
 
 // ==========================================================
 // 1) Construire `mutations` — regroupement par id_mutation (LE PIÈGE DVF)
@@ -23,7 +34,6 @@ print("Documents bruts importés : " + db.lots_bruts.countDocuments({}));
 // sinon valeur_fonciere est comptée plusieurs fois pour la même vente.
 
 db.lots_bruts.aggregate([
-  // On ignore les lignes sans valeur ou sans coordonnées essentielles.
   {
     $match: {
       id_mutation: { $ne: null, $ne: "" },
@@ -48,6 +58,7 @@ db.lots_bruts.aggregate([
       },
       date_mutation_dt: { $dateFromString: { dateString: "$date_mutation", onError: null } },
       code_postal_str: { $toString: "$code_postal" },
+      code_commune_str: { $toString: "$code_commune" },
     },
   },
   // Un id_mutation = un document, avec ses lots imbriqués (EMBED).
@@ -56,11 +67,11 @@ db.lots_bruts.aggregate([
       _id: "$id_mutation",
       date_mutation: { $first: "$date_mutation_dt" },
       valeur_fonciere: { $first: "$valeur_fonciere_num" },
+      code_commune: { $first: "$code_commune_str" },
       code_postal: { $first: "$code_postal_str" },
       nom_commune: { $first: "$nom_commune" },
       longitude: { $first: "$longitude_num" },
       latitude: { $first: "$latitude_num" },
-      type_local_dominant: { $first: "$type_local" },
       lots: {
         $push: {
           type_local: "$type_local",
@@ -70,10 +81,35 @@ db.lots_bruts.aggregate([
       },
     },
   },
-  // GeoJSON : uniquement si les deux coordonnées existent.
+  // type_local_dominant : Maison > Appartement > premier type non vide >
+  // "Terrain / non bâti" (aucun type renseigné = terrain non bâti).
   {
     $addFields: {
       id_mutation: "$_id",
+      surface_totale: { $sum: "$lots.surface_reelle_bati" },
+      type_local_dominant: {
+        $switch: {
+          branches: [
+            { case: { $in: ["Maison", "$lots.type_local"] }, then: "Maison" },
+            { case: { $in: ["Appartement", "$lots.type_local"] }, then: "Appartement" },
+            {
+              case: {
+                $gt: [
+                  { $size: { $filter: { input: "$lots.type_local", cond: { $ne: ["$$this", ""] } } } },
+                  0,
+                ],
+              },
+              then: {
+                $arrayElemAt: [
+                  { $filter: { input: "$lots.type_local", cond: { $ne: ["$$this", ""] } } },
+                  0,
+                ],
+              },
+            },
+          ],
+          default: "Terrain / non bâti",
+        },
+      },
       position: {
         $cond: [
           { $and: [{ $ne: ["$longitude", null] }, { $ne: ["$latitude", null] }] },
@@ -89,27 +125,33 @@ db.lots_bruts.aggregate([
 
 print("Mutations construites : " + db.mutations.countDocuments({}));
 
+// Vérification du nettoyage type_local_dominant
+print("\n--- Vérification type_local_dominant ---");
+print("Valeurs vides ou nulles restantes : " +
+      db.mutations.countDocuments({ $or: [{ type_local_dominant: "" }, { type_local_dominant: null }] }));
+print("Mutations classées \"Terrain / non bâti\" : " +
+      db.mutations.countDocuments({ type_local_dominant: "Terrain / non bâti" }));
+
 // ==========================================================
 // 2) Construire `communes` — référentiel léger (REFERENCE)
 // ==========================================================
-// Stats précalculées (pattern Computed, Jour 2) : prix/m² moyen et nombre
-// de mutations par commune, recalculables à tout moment par ce même script.
+// Clé = code_commune (INSEE), PAS code_postal (cf. anomalie § 0).
+// Stats précalculées (pattern Computed) : prix/m² moyen et nb de mutations,
+// recalculables à tout moment en relançant ce même script.
 
 db.mutations.aggregate([
   {
     $match: {
-      // Exclut les mutations à valeur symbolique (donations, transmissions
-      // familiales, régularisations) non représentatives d'un prix de marché.
-      // Mesuré : 622/29519 mutations (≈2,1%) < 1000€, dont 235 à ≤1€.
-      valeur_fonciere: { $gte: 1000 },
+      valeur_fonciere: { $gte: 1000 }, // exclut donations/régularisations
+      surface_totale: { $gt: 0 },
+      code_commune: { $ne: null, $ne: "" },
     },
   },
-  { $addFields: { surface_totale: { $sum: "$lots.surface_reelle_bati" } } },
-  { $match: { surface_totale: { $gt: 0 }, code_postal: { $ne: null } } },
   {
     $group: {
-      _id: "$code_postal",
+      _id: "$code_commune",
       nom_commune: { $first: "$nom_commune" },
+      code_postal: { $first: "$code_postal" }, // conservé pour affichage
       valeur_totale: { $sum: "$valeur_fonciere" },
       surface_totale: { $sum: "$surface_totale" },
       nb_mutations: { $sum: 1 },
@@ -118,6 +160,7 @@ db.mutations.aggregate([
   {
     $project: {
       nom_commune: 1,
+      code_postal: 1,
       nb_mutations: 1,
       prix_m2_moyen: { $round: [{ $divide: ["$valeur_totale", "$surface_totale"] }, 2] },
     },
@@ -128,14 +171,19 @@ db.mutations.aggregate([
 print("Communes construites : " + db.communes.countDocuments({}));
 
 // ==========================================================
-// 3) Vérifications rapides (à garder pour le rapport)
+// 3) Vérifications finales (à garder pour le rapport)
 // ==========================================================
-print("\n--- Vérification du piège de comptage ---");
+print("\n--- Vérification du piège de comptage (id_mutation) ---");
 print("Lignes brutes (lots_bruts) : " + db.lots_bruts.countDocuments({}));
 print("id_mutation distincts (naïf, sur lots_bruts) : " +
       db.lots_bruts.distinct("id_mutation").length);
 print("Mutations après regroupement : " + db.mutations.countDocuments({}));
-print("(Ces deux derniers chiffres doivent être égaux — sinon le $group a un bug.)");
+
+print("\n--- Vérification des valeurs foncières symboliques ---");
+print("Mutations avec valeur_fonciere < 1000€ : " +
+      db.mutations.countDocuments({ valeur_fonciere: { $lt: 1000 } }));
+print("Mutations avec valeur_fonciere <= 1€ : " +
+      db.mutations.countDocuments({ valeur_fonciere: { $lte: 1 } }));
 
 print("\nExemple de mutation avec plusieurs lots :");
 printjson(db.mutations.findOne({ "lots.1": { $exists: true } }));
