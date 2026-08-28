@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pymongo import ASCENDING, DESCENDING, GEOSPHERE, MongoClient
+from pymongo.errors import DuplicateKeyError
 
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB = os.environ.get("MONGO_DB", "immo")
@@ -179,7 +180,13 @@ def detail(item_id: str) -> dict[str, Any]:
 
 @app.post("/mutations", status_code=201)
 def creer(mutation: MutationEntrant) -> dict[str, str]:
-    resultat = col.insert_one(vers_document(mutation))
+    try:
+        resultat = col.insert_one(vers_document(mutation))
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Une mutation avec id_mutation={mutation.id_mutation!r} existe déjà",
+        )
     return {"_id": str(resultat.inserted_id)}
 
 
