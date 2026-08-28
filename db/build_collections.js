@@ -1,17 +1,32 @@
-// db/build_collections.js — Construit `mutations` et `communes` à partir du
-// CSV DVF importé brut (une ligne = un lot, id_mutation répété).
+// db/build_collections.js
 //
-// PRÉREQUIS : import brut déjà fait dans la collection `lots_bruts` :
+// Construit les collections `mutations` et `communes`
+// à partir de la collection brute `lots_bruts`.
 //
-//   mongoimport -u admin -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin \
-//     --db immo --collection lots_bruts --type csv --headerline --drop \
-//     --file /tmp/dvf34.csv
+// Collection source : lots_bruts
+// Une ligne CSV = un lot / une parcelle.
+// Plusieurs lignes peuvent avoir le même id_mutation.
 //
-// Exécution (une fois lots_bruts importé) :
-//   docker exec -i projet-mongo mongosh -u admin -p "$MONGO_ROOT_PASSWORD" \
-//     --authenticationDatabase admin immo < db/build_collections.js
+// Objectif :
+// - mutations : 1 document par id_mutation, avec les lots imbriqués
+// - communes : 1 document par code_commune
+//
+// IMPORTANT :
+// - lots_bruts n'est jamais supprimée par ce script.
+// - mutations et communes sont reconstruites à chaque exécution.
 
-print("Documents bruts importés : " + db.lots_bruts.countDocuments({}));
+// ==========================================================
+// 0) Nettoyage des anciennes collections dérivées
+// ==========================================================
+
+db.mutations.drop();
+db.communes.drop();
+
+print(
+  "Documents bruts importés : " +
+  db.lots_bruts.countDocuments({})
+);
+
 
 // ==========================================================
 // 1) Construire `mutations`
@@ -24,17 +39,26 @@ print("Documents bruts importés : " + db.lots_bruts.countDocuments({}));
 
 db.lots_bruts.aggregate([
 
-  // On conserve uniquement les lignes qui possèdent :
-  // - un id_mutation
-  // - une valeur foncière exploitable
+  // --------------------------------------------------------
+  // 1.1) Garder uniquement les lignes exploitables
+  // --------------------------------------------------------
+
   {
     $match: {
-      id_mutation: { $nin: [null, ""] },
-      valeur_fonciere: { $nin: [null, ""] }
+      id_mutation: {
+        $nin: [null, ""]
+      },
+      valeur_fonciere: {
+        $nin: [null, ""]
+      }
     }
   },
 
-  // Conversion des valeurs provenant du CSV.
+
+  // --------------------------------------------------------
+  // 1.2) Conversion des données venant du CSV
+  // --------------------------------------------------------
+
   {
     $addFields: {
 
@@ -82,33 +106,108 @@ db.lots_bruts.aggregate([
           onNull: null
         }
       },
-      date_mutation_dt: { $dateFromString: { dateString: "$date_mutation", onError: null } },
-    },
+
+      date_mutation_dt: {
+        $dateFromString: {
+          dateString: "$date_mutation",
+          onError: null,
+          onNull: null
+        }
+      },
+
+      // Un code postal est un identifiant.
+      // On le stocke donc comme chaîne de caractères.
+      code_postal_str: {
+        $convert: {
+          input: "$code_postal",
+          to: "string",
+          onError: null,
+          onNull: null
+        }
+      }
+    }
   },
-  // Un id_mutation = un document, avec ses lots imbriqués (EMBED).
+
+
+  // --------------------------------------------------------
+  // 1.3) Retirer les valeurs foncières non convertibles
+  // --------------------------------------------------------
+
+  {
+    $match: {
+      valeur_fonciere_num: {
+        $ne: null
+      }
+    }
+  },
+
+
+  // --------------------------------------------------------
+  // 1.4) Un id_mutation = un document
+  // --------------------------------------------------------
+  //
+  // Les lots sont EMBED dans le document mutation.
+
   {
     $group: {
 
       _id: "$id_mutation",
-      date_mutation: { $first: "$date_mutation_dt" },
-      valeur_fonciere: { $first: "$valeur_fonciere_num" },
-      code_postal: { $first: "$code_postal" },
-      nom_commune: { $first: "$nom_commune" },
-      longitude: { $first: "$longitude_num" },
-      latitude: { $first: "$latitude_num" },
-      type_local_dominant: { $first: "$type_local" },
+
+      date_mutation: {
+        $first: "$date_mutation_dt"
+      },
+
+      valeur_fonciere: {
+        $first: "$valeur_fonciere_num"
+      },
+
+      // IMPORTANT :
+      // la relation avec communes se fait avec code_commune.
+      code_commune: {
+        $first: "$code_commune"
+      },
+
+      // Code postal converti en string.
+      code_postal: {
+        $first: "$code_postal_str"
+      },
+
+      nom_commune: {
+        $first: "$nom_commune"
+      },
+
+      longitude: {
+        $first: "$longitude_num"
+      },
+
+      latitude: {
+        $first: "$latitude_num"
+      },
+
+      // Tous les types rencontrés dans la mutation.
+      types_locaux: {
+        $addToSet: "$type_local"
+      },
+
+      // Lots imbriqués.
       lots: {
         $push: {
+
           type_local: "$type_local",
+
           surface_reelle_bati: "$surface_num",
+
           nb_pieces: "$nb_pieces_num"
         }
       }
     }
   },
 
-  // Calcul de la surface bâtie totale de la mutation,
-  // création de la position GeoJSON et nettoyage des types locaux.
+
+  // --------------------------------------------------------
+  // 1.5) Surface totale + nettoyage + GeoJSON
+  // --------------------------------------------------------
+
   {
     $addFields: {
 
@@ -118,54 +217,89 @@ db.lots_bruts.aggregate([
         $sum: "$lots.surface_reelle_bati"
       },
 
-      // On retire null et "" de la liste des types de locaux.
+      // Supprime les types null ou vides.
       types_locaux: {
         $filter: {
+
           input: "$types_locaux",
+
           as: "type",
+
           cond: {
             $and: [
-              { $ne: ["$$type", null] },
-              { $ne: ["$$type", ""] }
+              {
+                $ne: [
+                  "$$type",
+                  null
+                ]
+              },
+              {
+                $ne: [
+                  "$$type",
+                  ""
+                ]
+              }
             ]
           }
         }
       },
 
-      // Coordonnées au format GeoJSON.
+      // Position au format GeoJSON.
       position: {
         $cond: [
+
           {
             $and: [
-              { $ne: ["$longitude", null] },
-              { $ne: ["$latitude", null] }
+              {
+                $ne: [
+                  "$longitude",
+                  null
+                ]
+              },
+              {
+                $ne: [
+                  "$latitude",
+                  null
+                ]
+              }
             ]
           },
+
           {
             type: "Point",
+
             coordinates: [
               "$longitude",
               "$latitude"
             ]
           },
+
           "$$REMOVE"
         ]
       }
     }
   },
 
-  // On choisit un type principal exploitable pour le front.
+
+  // --------------------------------------------------------
+  // 1.6) Choix du type_local_dominant
+  // --------------------------------------------------------
   //
   // Règle :
-  // 1. si la mutation contient une Maison -> Maison
-  // 2. sinon si elle contient un Appartement -> Appartement
-  // 3. sinon premier type_local non vide
-  // 4. si aucun type_local n'est renseigné -> Terrain / non bâti
+  // 1. Maison si la mutation contient une maison
+  // 2. sinon Appartement
+  // 3. sinon premier type non vide
+  // 4. sinon Terrain / non bâti
+
   {
     $addFields: {
+
       type_local_dominant: {
+
         $switch: {
+
           branches: [
+
             {
               case: {
                 $in: [
@@ -173,8 +307,10 @@ db.lots_bruts.aggregate([
                   "$types_locaux"
                 ]
               },
+
               then: "Maison"
             },
+
             {
               case: {
                 $in: [
@@ -182,18 +318,22 @@ db.lots_bruts.aggregate([
                   "$types_locaux"
                 ]
               },
+
               then: "Appartement"
             }
           ],
 
           default: {
+
             $ifNull: [
+
               {
                 $arrayElemAt: [
                   "$types_locaux",
                   0
                 ]
               },
+
               "Terrain / non bâti"
             ]
           }
@@ -202,23 +342,38 @@ db.lots_bruts.aggregate([
     }
   },
 
-  // Les coordonnées intermédiaires ne sont plus nécessaires.
+
+  // --------------------------------------------------------
+  // 1.7) Retirer les champs intermédiaires
+  // --------------------------------------------------------
+
   {
     $project: {
+
       longitude: 0,
+
       latitude: 0
     }
   },
 
-  // Création de la collection mutations.
+
+  // --------------------------------------------------------
+  // 1.8) Création de la collection mutations
+  // --------------------------------------------------------
+
   {
     $merge: {
+
       into: "mutations",
+
       whenMatched: "replace",
+
       whenNotMatched: "insert"
     }
   }
+
 ]);
+
 
 print(
   "Mutations construites : " +
@@ -233,11 +388,35 @@ print(
 // Une commune est identifiée avec code_commune,
 // et NON avec code_postal.
 //
-// Plusieurs communes peuvent partager le même code postal.
+// Plusieurs communes peuvent partager un même code postal.
 
 db.mutations.aggregate([
-  { $addFields: { surface_totale: { $sum: "$lots.surface_reelle_bati" } } },
-  { $match: { surface_totale: { $gt: 0 }, code_postal: { $ne: null } } },
+
+  // --------------------------------------------------------
+  // 2.1) Garder les mutations avec surface exploitable
+  // --------------------------------------------------------
+
+  {
+    $match: {
+
+      surface_totale: {
+        $gt: 0
+      },
+
+      code_commune: {
+        $nin: [
+          null,
+          ""
+        ]
+      }
+    }
+  },
+
+
+  // --------------------------------------------------------
+  // 2.2) Une ligne par code_commune
+  // --------------------------------------------------------
+
   {
     $group: {
 
@@ -265,7 +444,11 @@ db.mutations.aggregate([
     }
   },
 
-  // Statistiques précalculées par commune.
+
+  // --------------------------------------------------------
+  // 2.3) Statistiques par commune
+  // --------------------------------------------------------
+
   {
     $project: {
 
@@ -280,28 +463,40 @@ db.mutations.aggregate([
       nb_mutations: 1,
 
       prix_m2_moyen: {
+
         $round: [
+
           {
             $divide: [
               "$valeur_totale",
               "$surface_totale"
             ]
           },
+
           2
         ]
       }
     }
   },
 
-  // Création de la collection communes.
+
+  // --------------------------------------------------------
+  // 2.4) Création de la collection communes
+  // --------------------------------------------------------
+
   {
     $merge: {
+
       into: "communes",
+
       whenMatched: "replace",
+
       whenNotMatched: "insert"
     }
   }
+
 ]);
+
 
 print(
   "Communes construites : " +
@@ -313,20 +508,28 @@ print(
 // 3) Vérifications pour le rapport
 // ==========================================================
 
-print("\n--- Vérification du piège de comptage ---");
+print(
+  "\n--- Vérification du piège de comptage ---"
+);
+
 
 const lignesBrutes =
   db.lots_bruts.countDocuments({});
+
 
 const totalMutations =
   db.lots_bruts.distinct(
     "id_mutation"
   ).length;
 
+
 const mutationsExploitables =
   db.lots_bruts.distinct(
+
     "id_mutation",
+
     {
+
       id_mutation: {
         $nin: [
           null,
@@ -341,30 +544,37 @@ const mutationsExploitables =
         ]
       }
     }
+
   ).length;
+
 
 const mutationsConstruites =
   db.mutations.countDocuments({});
+
 
 print(
   "Lignes brutes (lots_bruts) : " +
   lignesBrutes
 );
 
+
 print(
   "id_mutation distincts au total : " +
   totalMutations
 );
+
 
 print(
   "id_mutation exploitables : " +
   mutationsExploitables
 );
 
+
 print(
   "Mutations après regroupement : " +
   mutationsConstruites
 );
+
 
 print(
   "Mutations exclues faute de valeur foncière : " +
@@ -379,7 +589,10 @@ print(
 // 4) Vérification des communes
 // ==========================================================
 
-print("\n--- Vérification des communes ---");
+print(
+  "\n--- Vérification des communes ---"
+);
+
 
 print(
   "Codes postaux distincts dans les données brutes : " +
@@ -388,12 +601,14 @@ print(
   ).length
 );
 
+
 print(
   "Codes communes distincts dans les données brutes : " +
   db.lots_bruts.distinct(
     "code_commune"
   ).length
 );
+
 
 print(
   "Communes présentes dans le référentiel final : " +
@@ -402,72 +617,150 @@ print(
 
 
 // ==========================================================
-// 5) Vérifications après nettoyage
+// 5) Vérification du nettoyage des types
 // ==========================================================
 
 print(
   "\n--- Vérification des types après nettoyage ---"
 );
 
+
 print(
   "Mutations avec type_local_dominant vide ou null : " +
+
   db.mutations.countDocuments({
+
     $or: [
+
       {
         type_local_dominant: null
       },
+
       {
         type_local_dominant: ""
       }
+
     ]
   })
 );
 
+
 print(
   "Mutations classées Terrain / non bâti : " +
+
   db.mutations.countDocuments({
-    type_local_dominant: "Terrain / non bâti"
+
+    type_local_dominant:
+      "Terrain / non bâti"
+
   })
 );
 
 
 // ==========================================================
-// 6) Vérification de code_postal
+// 6) Vérification du type BSON de code_postal
 // ==========================================================
 
 print(
   "\n--- Vérification du type de code_postal ---"
 );
 
+
 printjson(
-  db.mutations.findOne(
+
+  db.mutations.aggregate([
+
     {
-      code_postal: {
-        $ne: null
+      $match: {
+
+        code_postal: {
+          $ne: null
+        }
       }
     },
+
     {
-      _id: 0,
-      nom_commune: 1,
-      code_postal: 1,
-      type_local_dominant: 1
+      $project: {
+
+        _id: 0,
+
+        nom_commune: 1,
+
+        code_postal: 1,
+
+        type_code_postal: {
+          $type: "$code_postal"
+        },
+
+        type_local_dominant: 1
+      }
+    },
+
+    {
+      $limit: 1
     }
-  )
+
+  ]).toArray()
+
 );
 
 
 // ==========================================================
-// 7) Exemple pour la démonstration
+// 7) Vérification de la relation code_commune
+// ==========================================================
+
+print(
+  "\n--- Vérification relation mutations / communes ---"
+);
+
+
+printjson(
+
+  db.mutations.findOne(
+
+    {
+      code_commune: {
+        $nin: [
+          null,
+          ""
+        ]
+      }
+    },
+
+    {
+      _id: 0,
+
+      id_mutation: 1,
+
+      nom_commune: 1,
+
+      code_commune: 1,
+
+      code_postal: 1
+    }
+
+  )
+
+);
+
+
+// ==========================================================
+// 8) Exemple pour la démonstration
 // ==========================================================
 
 print(
   "\n--- Exemple de mutation avec plusieurs lots ---"
 );
 
+
 printjson(
+
   db.mutations.findOne({
+
     "lots.1": {
       $exists: true
     }
+
   })
+
 );
