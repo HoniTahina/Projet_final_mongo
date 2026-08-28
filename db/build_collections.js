@@ -45,6 +45,7 @@ db.lots_bruts.aggregate([
         $convert: { input: "$latitude", to: "double", onError: null, onNull: null },
       },
       date_mutation_dt: { $dateFromString: { dateString: "$date_mutation", onError: null } },
+      code_postal_str: { $toString: "$code_postal" },
     },
   },
   // Un id_mutation = un document, avec ses lots imbriqués (EMBED).
@@ -53,7 +54,7 @@ db.lots_bruts.aggregate([
       _id: "$id_mutation",
       date_mutation: { $first: "$date_mutation_dt" },
       valeur_fonciere: { $first: "$valeur_fonciere_num" },
-      code_postal: { $first: "$code_postal" },
+      code_postal: { $first: "$code_postal_str" },
       nom_commune: { $first: "$nom_commune" },
       longitude: { $first: "$longitude_num" },
       latitude: { $first: "$latitude_num" },
