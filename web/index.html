@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Projet NoSQL — front minimal</title>
+  <style>
+    :root { --vert: #0d7a4f; --fond: #f6f8f7; --bord: #d7e0da; --texte: #16241d; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 2rem 1.5rem; font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+           background: var(--fond); color: var(--texte); }
+    main { max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+    p.sous { margin: 0 0 2rem; color: #55665e; }
+    section { background: #fff; border: 1px solid var(--bord); border-radius: 10px;
+              padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 .75rem; color: var(--vert); }
+    button { background: var(--vert); color: #fff; border: 0; border-radius: 6px;
+             padding: .5rem 1rem; font-size: .95rem; cursor: pointer; }
+    button:hover { filter: brightness(1.1); }
+    table { width: 100%; border-collapse: collapse; margin-top: .75rem; font-size: .95rem; }
+    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--bord); }
+    th { font-weight: 600; color: #55665e; }
+    pre { background: #16241d; color: #d6f5e5; padding: .9rem; border-radius: 6px;
+          overflow-x: auto; font-size: .85rem; margin: .75rem 0 0; }
+    .etat { font-size: .9rem; color: #55665e; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Projet NoSQL — front minimal</h1>
+  <p class="sous">Squelette de démonstration. Remplacez ces blocs par le tableau, la carte
+     ou le graphique de votre sujet.</p>
+
+  <section>
+    <h2>État de l'API</h2>
+    <button id="btn-health">Interroger /health</button>
+    <p class="etat" id="etat">—</p>
+  </section>
+
+  <section>
+    <h2>Agrégation : poids par catégorie</h2>
+    <button id="btn-agg">Charger /agg/par-categorie</button>
+    <table id="tableau" hidden>
+      <thead><tr><th>Catégorie</th><th>Documents</th><th>Total</th><th>Moyenne</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Plan d'exécution</h2>
+    <button id="btn-explain">Charger /agg/explain</button>
+    <pre id="explain" hidden></pre>
+  </section>
+</main>
+
+<script>
+const API = "http://localhost:8000";
+
+async function appel(chemin) {
+  const r = await fetch(API + chemin);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+document.getElementById("btn-health").onclick = async () => {
+  const etat = document.getElementById("etat");
+  try {
+    const d = await appel("/health");
+    etat.textContent = `OK — base « ${d.base} », collection « ${d.collection} », ${d.documents} documents.`;
+  } catch (e) {
+    etat.textContent = "Erreur : " + e.message + " — l'API est-elle démarrée ?";
+  }
+};
+
+document.getElementById("btn-agg").onclick = async () => {
+  const table = document.getElementById("tableau");
+  const corps = table.querySelector("tbody");
+  try {
+    const lignes = await appel("/agg/par-categorie");
+    corps.innerHTML = lignes.length
+      ? lignes.map(l => `<tr><td>${l.categorie}</td><td>${l.n}</td><td>${l.total}</td><td>${l.moyenne}</td></tr>`).join("")
+      : `<tr><td colspan="4">Aucune donnée — importez d'abord votre jeu de données.</td></tr>`;
+    table.hidden = false;
+  } catch (e) {
+    corps.innerHTML = `<tr><td colspan="4">Erreur : ${e.message}</td></tr>`;
+    table.hidden = false;
+  }
+};
+
+document.getElementById("btn-explain").onclick = async () => {
+  const bloc = document.getElementById("explain");
+  try {
+    bloc.textContent = JSON.stringify(await appel("/agg/explain"), null, 2);
+  } catch (e) {
+    bloc.textContent = "Erreur : " + e.message;
+  }
+  bloc.hidden = false;
+};
+</script>
+</body>
+</html>

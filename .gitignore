@@ -1,0 +1,28 @@
+.env
+
+# Jeux de données : JAMAIS dans le dépôt. Plusieurs des sujets proposés se
+# téléchargent en .json de 20 à 80 Mo — un dépôt qui les contient est un dépôt
+# que personne ne clone. Le README doit donner la commande de téléchargement,
+# pas les données elles-mêmes.
+*.csv
+*.json
+*.json.gz
+*.zip
+*.bson
+data/
+dump/
+
+# ... mais on garde les fichiers de configuration, qui sont aussi du .json
+!package.json
+!package-lock.json
+!tsconfig.json
+!composer.json
+
+# ... et les captures du rapport : un explain() enregistré en .json serait
+# ignoré en silence par la règle *.json ci-dessus, et absent du dépôt.
+!rapport/captures/
+!rapport/captures/**
+
+__pycache__/
+.venv/
+node_modules/

@@ -1,0 +1,64 @@
+# Projet final — squelette de départ : MongoDB + API REST + front statique
+#   cp .env.example .env && docker compose up -d
+#   curl http://localhost:8000/health   puis   http://localhost:3000
+#
+# AVANT DE DÉMARRER : cette stack occupe les ports 27017, 8000 et 3000.
+# Le port 27017 est celui des TP des Jours 1 à 4. Si un conteneur MongoDB de la
+# semaine tourne encore, `docker compose up` échouera sur « port is already
+# allocated ». Vérifiez et libérez :
+#   docker ps
+#   docker stop mongo-ipssi mongo-j4 mongo1 mongo2 mongo3 mongos 2>/dev/null
+name: projet-nosql
+
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: projet-mongo
+    restart: unless-stopped
+    command: ["mongod", "--auth", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+      # lues par db/01-init-app-user.js
+      MONGO_APP_USER: ${MONGO_APP_USER}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
+    # En production : ne publier que sur la boucle locale -> "127.0.0.1:27017:27017"
+    ports: ["27017:27017"]
+    volumes:
+      - mongodata:/data/db
+      - ./db:/docker-entrypoint-initdb.d:ro   # scripts joués UNE FOIS, à la création du volume
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: ./api
+    container_name: projet-api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://${MONGO_APP_USER}:${MONGO_APP_PASSWORD}@mongo:27017/${MONGO_DB}?authSource=${MONGO_DB}
+      MONGO_DB: ${MONGO_DB}
+      COLLECTION: ${COLLECTION}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      # Indispensable pour la capture explain() avant/après (§ 1.5) : sans cette
+      # ligne, AUTO_INDEX reste dans le .env et n'atteint jamais l'API.
+      AUTO_INDEX: ${AUTO_INDEX:-true}
+    ports: ["8000:8000"]
+
+  web:
+    image: nginx:alpine
+    container_name: projet-web
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["3000:80"]
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+
+volumes:
+  mongodata:
