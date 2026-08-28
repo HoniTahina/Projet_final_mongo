@@ -42,7 +42,7 @@ https://files.data.gouv.fr/geo-dvf/latest/csv/2024/departements/34.csv.gz
 }
 ```
 
-**`communes`** (référentiel léger, ~340 documents) :
+**`communes`** (référentiel léger, 331 documents — sur 340 codes commune réels ; l'écart correspond aux communes n'ayant aucune mutation exploitable ≥1000€) :
 
 ```javascript
 {
@@ -107,7 +107,7 @@ docker exec -i projet-mongo mongosh -u admin -p "$MONGO_ROOT_PASSWORD" \
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"ok","base":"immo","collection":"mutations","documents":29519,"communes":340}
+# {"status":"ok","base":"immo","collection":"mutations","documents":29519,"communes":331}
 ```
 
 Front : http://localhost:3000
@@ -121,17 +121,17 @@ Documentation interactive de l'API : http://localhost:8000/docs
 | `{ id_mutation: 1 }` unique | Empêche les doublons de mutation (piège de comptage) |
 | `{ position: "2dsphere" }` | Requêtes de proximité géographique (`$geoNear`) |
 
-**Capture `explain()` avant/après** (filtre par commune, requête la plus fréquente) :
+**Capture `explain()` avant/après** (filtre par commune, requête la plus fréquente — Montpellier, code_commune 34172) :
 
 | Métrique | Avant (COLLSCAN) | Après (FETCH → IXSCAN) |
 |---|---|---|
 | Stage | COLLSCAN | FETCH → IXSCAN |
-| totalDocsExamined | 29 519 | 1 931 |
-| nReturned | 1 931 | 1 931 |
-| Ratio | 15,3 | **1,0** |
-| Temps d'exécution | 161 ms | 5 ms |
+| totalDocsExamined | 29 519 | 5 585 |
+| nReturned | 5 585 | 5 585 |
+| Ratio | 5,3 | **1,0** |
+| Temps d'exécution | 22 ms | 18 ms |
 
-Captures complètes dans `rapport/captures/`.
+Captures complètes dans `rapport/captures/` (`explain_avant.json`, `explain_apres.json`).
 
 ## 6. Routes de l'API
 
