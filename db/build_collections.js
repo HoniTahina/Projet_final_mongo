@@ -11,6 +11,8 @@
 //   docker exec -i projet-mongo mongosh -u admin -p "$MONGO_ROOT_PASSWORD" \
 //     --authenticationDatabase admin immo < db/build_collections.js
 
+use immo;
+
 print("Documents bruts importés : " + db.lots_bruts.countDocuments({}));
 
 // ==========================================================
@@ -94,6 +96,14 @@ print("Mutations construites : " + db.mutations.countDocuments({}));
 // de mutations par commune, recalculables à tout moment par ce même script.
 
 db.mutations.aggregate([
+  {
+    $match: {
+      // Exclut les mutations à valeur symbolique (donations, transmissions
+      // familiales, régularisations) non représentatives d'un prix de marché.
+      // Mesuré : 622/29519 mutations (≈2,1%) < 1000€, dont 235 à ≤1€.
+      valeur_fonciere: { $gte: 1000 },
+    },
+  },
   { $addFields: { surface_totale: { $sum: "$lots.surface_reelle_bati" } } },
   { $match: { surface_totale: { $gt: 0 }, code_postal: { $ne: null } } },
   {

@@ -211,7 +211,17 @@ def prix_m2_evolution(code_postal: str) -> list[dict[str, Any]]:
     serait comptée une fois par lot et fausserait le prix au m².
     """
     pipeline = [
-        {"$match": {"code_postal": code_postal}},
+        {
+            "$match": {
+                "code_postal": code_postal,
+                # Exclut les mutations à valeur symbolique (donations,
+                # transmissions familiales, régularisations administratives)
+                # non représentatives d'un prix de marché. Mesuré sur le
+                # jeu complet : 622 mutations sur 29519 (≈ 2,1 %) ont une
+                # valeur_fonciere < 1000€, dont 235 à 1€ ou moins.
+                "valeur_fonciere": {"$gte": 1000},
+            }
+        },
         {"$addFields": {"surface_totale": {"$sum": "$lots.surface_reelle_bati"}}},
         {"$match": {"surface_totale": {"$gt": 0}}},
         {
@@ -246,6 +256,13 @@ def top10_communes(limite: int = Query(10, ge=1, le=50)) -> list[dict[str, Any]]
     récupéré depuis le référentiel `communes`.
     """
     pipeline = [
+        {
+            "$match": {
+                # Cf. commentaire de prix_m2_evolution : exclut les valeurs
+                # symboliques non représentatives d'un prix de marché.
+                "valeur_fonciere": {"$gte": 1000},
+            }
+        },
         {"$addFields": {"surface_totale": {"$sum": "$lots.surface_reelle_bati"}}},
         {"$match": {"surface_totale": {"$gt": 0}}},
         {

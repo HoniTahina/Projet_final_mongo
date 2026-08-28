@@ -1,102 +1,190 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Projet NoSQL — front minimal</title>
-  <style>
-    :root { --vert: #0d7a4f; --fond: #f6f8f7; --bord: #d7e0da; --texte: #16241d; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 2rem 1.5rem; font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
-           background: var(--fond); color: var(--texte); }
-    main { max-width: 900px; margin: 0 auto; }
-    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
-    p.sous { margin: 0 0 2rem; color: #55665e; }
-    section { background: #fff; border: 1px solid var(--bord); border-radius: 10px;
-              padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
-    h2 { font-size: 1.05rem; margin: 0 0 .75rem; color: var(--vert); }
-    button { background: var(--vert); color: #fff; border: 0; border-radius: 6px;
-             padding: .5rem 1rem; font-size: .95rem; cursor: pointer; }
-    button:hover { filter: brightness(1.1); }
-    table { width: 100%; border-collapse: collapse; margin-top: .75rem; font-size: .95rem; }
-    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--bord); }
-    th { font-weight: 600; color: #55665e; }
-    pre { background: #16241d; color: #d6f5e5; padding: .9rem; border-radius: 6px;
-          overflow-x: auto; font-size: .85rem; margin: .75rem 0 0; }
-    .etat { font-size: .9rem; color: #55665e; }
-  </style>
+<meta charset="UTF-8" />
+<title>Immobilier Hérault — DVF</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.4rem; }
+  section { margin-bottom: 2.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid #ddd; }
+  h2 { font-size: 1.1rem; color: #34495e; }
+  table { border-collapse: collapse; width: 100%; margin-top: 0.8rem; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: right; font-size: 0.9rem; }
+  th { background: #f4f6f8; text-align: left; }
+  td:first-child, th:first-child { text-align: left; }
+  form { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  input { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; width: 100px; }
+  button { padding: 5px 14px; border: none; background: #2c7be5; color: white; border-radius: 4px; cursor: pointer; }
+  button:hover { background: #1a5cb0; }
+  .erreur { color: #c0392b; font-size: 0.9rem; margin-top: 0.5rem; }
+  .info { color: #777; font-size: 0.85rem; }
+</style>
 </head>
 <body>
-<main>
-  <h1>Projet NoSQL — front minimal</h1>
-  <p class="sous">Squelette de démonstration. Remplacez ces blocs par le tableau, la carte
-     ou le graphique de votre sujet.</p>
 
-  <section>
-    <h2>État de l'API</h2>
-    <button id="btn-health">Interroger /health</button>
-    <p class="etat" id="etat">—</p>
-  </section>
+<h1>Immobilier Hérault — Demandes de Valeurs Foncières 2024</h1>
+<p class="info">Source : data.gouv.fr (DVF). Base MongoDB — collections <code>mutations</code> (29 519 documents) et <code>communes</code> (161 documents).</p>
 
-  <section>
-    <h2>Agrégation : poids par catégorie</h2>
-    <button id="btn-agg">Charger /agg/par-categorie</button>
-    <table id="tableau" hidden>
-      <thead><tr><th>Catégorie</th><th>Documents</th><th>Total</th><th>Moyenne</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
+<!-- ============================================================ -->
+<!-- Question métier 1 : évolution du prix au m² par commune -->
+<!-- ============================================================ -->
+<section>
+  <h2>1. Évolution du prix au m² pour une commune</h2>
+  <form id="form-evolution">
+    <label>Code postal : <input type="text" id="code-postal" value="34000" maxlength="5" /></label>
+    <button type="submit">Afficher</button>
+  </form>
+  <div id="erreur-evolution" class="erreur"></div>
+  <table id="table-evolution">
+    <thead><tr><th>Année</th><th>Prix moyen au m²</th><th>Nb mutations</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
 
-  <section>
-    <h2>Plan d'exécution</h2>
-    <button id="btn-explain">Charger /agg/explain</button>
-    <pre id="explain" hidden></pre>
-  </section>
-</main>
+<!-- ============================================================ -->
+<!-- Question métier 2 : top 10 communes les plus chères -->
+<!-- ============================================================ -->
+<section>
+  <h2>2. Top 10 des communes les plus chères</h2>
+  <table id="table-top10">
+    <thead><tr><th>Commune</th><th>Code postal</th><th>Prix moyen au m²</th><th>Nb mutations</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<!-- Question métier 3 : mutations dans un rayon donné -->
+<!-- ============================================================ -->
+<section>
+  <h2>3. Mutations à proximité d'un point</h2>
+  <form id="form-proximite">
+    <label>Longitude : <input type="number" step="0.0001" id="lon" value="3.8767" /></label>
+    <label>Latitude : <input type="number" step="0.0001" id="lat" value="43.6108" /></label>
+    <label>Rayon (km) : <input type="number" step="0.5" id="rayon" value="5" /></label>
+    <button type="submit">Rechercher</button>
+  </form>
+  <div id="erreur-proximite" class="erreur"></div>
+  <p class="info" id="info-proximite"></p>
+  <table id="table-proximite">
+    <thead><tr><th>Mutation</th><th>Code postal</th><th>Valeur foncière</th><th>Distance</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
 
 <script>
 const API = "http://localhost:8000";
 
-async function appel(chemin) {
-  const r = await fetch(API + chemin);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return r.json();
+function formatEuros(n) {
+  return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(n);
 }
 
-document.getElementById("btn-health").onclick = async () => {
-  const etat = document.getElementById("etat");
-  try {
-    const d = await appel("/health");
-    etat.textContent = `OK — base « ${d.base} », collection « ${d.collection} », ${d.documents} documents.`;
-  } catch (e) {
-    etat.textContent = "Erreur : " + e.message + " — l'API est-elle démarrée ?";
-  }
-};
+// ---------------------------------------------------------------
+// Question 1 — évolution prix/m² par commune
+// ---------------------------------------------------------------
+async function chargerEvolution(codePostal) {
+  const erreurEl = document.getElementById("erreur-evolution");
+  const tbody = document.querySelector("#table-evolution tbody");
+  erreurEl.textContent = "";
+  tbody.innerHTML = "";
 
-document.getElementById("btn-agg").onclick = async () => {
-  const table = document.getElementById("tableau");
-  const corps = table.querySelector("tbody");
   try {
-    const lignes = await appel("/agg/par-categorie");
-    corps.innerHTML = lignes.length
-      ? lignes.map(l => `<tr><td>${l.categorie}</td><td>${l.n}</td><td>${l.total}</td><td>${l.moyenne}</td></tr>`).join("")
-      : `<tr><td colspan="4">Aucune donnée — importez d'abord votre jeu de données.</td></tr>`;
-    table.hidden = false;
-  } catch (e) {
-    corps.innerHTML = `<tr><td colspan="4">Erreur : ${e.message}</td></tr>`;
-    table.hidden = false;
+    const reponse = await fetch(`${API}/agg/prix-m2-evolution/${encodeURIComponent(codePostal)}`);
+    if (!reponse.ok) {
+      throw new Error(`Erreur ${reponse.status} : ${reponse.statusText}`);
+    }
+    const lignes = await reponse.json();
+    if (lignes.length === 0) {
+      erreurEl.textContent = "Aucune mutation trouvée pour ce code postal.";
+      return;
+    }
+    for (const ligne of lignes) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${ligne.annee}</td><td>${formatEuros(ligne.prix_m2_moyen)}/m²</td><td>${ligne.n}</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (err) {
+    erreurEl.textContent = "Impossible de charger les données : " + err.message;
   }
-};
+}
 
-document.getElementById("btn-explain").onclick = async () => {
-  const bloc = document.getElementById("explain");
-  try {
-    bloc.textContent = JSON.stringify(await appel("/agg/explain"), null, 2);
-  } catch (e) {
-    bloc.textContent = "Erreur : " + e.message;
+document.getElementById("form-evolution").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const codePostal = document.getElementById("code-postal").value.trim();
+  if (!/^\d{5}$/.test(codePostal)) {
+    document.getElementById("erreur-evolution").textContent = "Le code postal doit contenir 5 chiffres.";
+    return;
   }
-  bloc.hidden = false;
-};
+  chargerEvolution(codePostal);
+});
+
+// ---------------------------------------------------------------
+// Question 2 — top 10 communes (chargé automatiquement au démarrage)
+// ---------------------------------------------------------------
+async function chargerTop10() {
+  const tbody = document.querySelector("#table-top10 tbody");
+  tbody.innerHTML = "";
+  try {
+    const reponse = await fetch(`${API}/agg/top10-communes`);
+    const lignes = await reponse.json();
+    for (const ligne of lignes) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${ligne.nom_commune}</td><td>${ligne.code_postal}</td><td>${formatEuros(ligne.prix_m2_moyen)}/m²</td><td>${ligne.n}</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4">Erreur de chargement : ${err.message}</td></tr>`;
+  }
+}
+
+// ---------------------------------------------------------------
+// Question 3 — proximité géographique
+// ---------------------------------------------------------------
+async function chargerProximite(lon, lat, rayonKm) {
+  const erreurEl = document.getElementById("erreur-proximite");
+  const infoEl = document.getElementById("info-proximite");
+  const tbody = document.querySelector("#table-proximite tbody");
+  erreurEl.textContent = "";
+  infoEl.textContent = "";
+  tbody.innerHTML = "";
+
+  try {
+    const url = `${API}/agg/proximite?lon=${lon}&lat=${lat}&rayon_km=${rayonKm}`;
+    const reponse = await fetch(url);
+    if (!reponse.ok) {
+      throw new Error(`Erreur ${reponse.status} : ${reponse.statusText}`);
+    }
+    const lignes = await reponse.json();
+    infoEl.textContent = `${lignes.length} mutation(s) trouvée(s) dans un rayon de ${rayonKm} km.`;
+    for (const ligne of lignes.slice(0, 50)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${ligne.id_mutation}</td><td>${ligne.code_postal}</td><td>${formatEuros(ligne.valeur_fonciere)}</td><td>${ligne.distance_m} m</td>`;
+      tbody.appendChild(tr);
+    }
+    if (lignes.length > 50) {
+      infoEl.textContent += " (50 premières affichées)";
+    }
+  } catch (err) {
+    erreurEl.textContent = "Impossible de charger les données : " + err.message;
+  }
+}
+
+document.getElementById("form-proximite").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const lon = parseFloat(document.getElementById("lon").value);
+  const lat = parseFloat(document.getElementById("lat").value);
+  const rayon = parseFloat(document.getElementById("rayon").value);
+  if (isNaN(lon) || isNaN(lat) || isNaN(rayon) || rayon <= 0) {
+    document.getElementById("erreur-proximite").textContent = "Coordonnées ou rayon invalides.";
+    return;
+  }
+  chargerProximite(lon, lat, rayon);
+});
+
+// Chargement initial
+chargerEvolution("34000");
+chargerTop10();
+chargerProximite(3.8767, 43.6108, 5);
 </script>
+
 </body>
 </html>
